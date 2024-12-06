@@ -130,7 +130,8 @@ class ElevatedServer:
     def main_process(self):
         self.transfer_loop()
         for fd in set(self.child_fds):
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
 
         print('pty closed, getting return value')
         (success, exit_status) = os.waitpid(self.child_pid, 0)
@@ -152,7 +153,12 @@ class ElevatedServer:
                     if fd == sock_fd:
                         cmd, data = self.channel.recv_command()
                         if cmd == CMD_STDIN:
-                            os.write(self.child_fds[0], data)
+                            if not data:
+                                # Close the child's stdin to send EOF
+                                os.close(self.child_fds[0])
+                                self.child_fds[0] = None
+                            else:
+                                os.write(self.child_fds[0], data)
                         elif cmd == CMD_WINSZ:
                             fcntl.ioctl(self.child_fds[1], termios.TIOCSWINSZ, data)
                             os.kill(self.child_pid, signal.SIGWINCH)
@@ -220,14 +226,20 @@ class UnprivilegedClient:
                 window_style = ['Hidden', 'Minimized', 'Normal'][visibility]
 
                 try:
-                    subprocess.check_call(
-                        ["powershell.exe", "Start-Process", "-Verb", "runas",
-                         "-WindowStyle", window_style,
-                         "-FilePath", "wsl", "-ArgumentList",
-                         '"{}"'.format(subprocess.list2cmdline([
-                             sys.executable, os.path.abspath(__file__),
-                             '--elevated', 'visible' if visibility else 'hidden',
-                             str(port), pwf.name]))])
+                    subprocess.check_call([
+                        "powershell.exe", "Start-Process",
+                        "-Verb", "runas",
+                        "-WindowStyle", window_style,
+                        "-FilePath", "wsl",
+                        "-ArgumentList", '"{}"'.format(subprocess.list2cmdline([
+                            sys.executable,
+                            os.path.abspath(__file__),
+                            '--elevated',
+                            'visible' if visibility else 'hidden',
+                            str(port),
+                            pwf.name,
+                        ]))
+                    ], stdin=subprocess.DEVNULL)
                 except subprocess.CalledProcessError as e:
                     print("wudo: failed to start elevated process")
                     return
@@ -264,6 +276,7 @@ class UnprivilegedClient:
                                 self.channel.send_command(CMD_STDIN, chunk)
                             else:
                                 # stdin is a pipe and is closed
+                                self.channel.send_command(CMD_STDIN, b'')
                                 fdset.remove(0)
                         else:
                             self.recv_command()
